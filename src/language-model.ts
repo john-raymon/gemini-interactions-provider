@@ -73,6 +73,12 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
 
   private async plan(options: LanguageModelV3CallOptions): Promise<ContinuationResult> {
     await ensureStore(this.store);
+    const toolsCount = Array.isArray(options.tools)
+      ? options.tools.length
+      : options.tools
+        ? Object.keys(options.tools).length
+        : 0;
+    debug(`[plan] promptMsgs=${options.prompt?.length ?? 0} toolsCount=${toolsCount} model=${this.inner.modelId}`);
     return findContinuation(
       {
         provider: this.inner.provider,

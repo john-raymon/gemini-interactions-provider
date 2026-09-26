@@ -94,6 +94,30 @@ describe('findContinuation', () => {
     if (r.kind === 'hit') expect(r.deltaStart).toBe(3);
   });
 
+  it('matches when replay contains empty reasoning and step-start markers from OpenCode', () => {
+    const hist1 = [sys('s'), user('edit file')];
+    // Stream produced only tool-call
+    const streamAsst = asstToolCall();
+    const [cpHash, cp] = checkpointFor(hist1, streamAsst.content);
+
+    // OpenCode replays with step-start and empty reasoning part
+    const replayedAsst = {
+      role: 'assistant' as const,
+      content: [
+        { type: 'step-start' as const },
+        { type: 'reasoning' as const, text: '' },
+        { type: 'tool-call' as const, toolCallId: 'c1', toolName: 'getWeather', input: { city: 'Lisbon' } },
+      ],
+    };
+
+    const r = findContinuation(
+      { ...PARAMS, messages: [...hist1, replayedAsst, toolResult()] },
+      seededLookup([[cpHash, cp]]),
+    );
+    expect(r.kind).toBe('hit');
+    if (r.kind === 'hit') expect(r.deltaStart).toBe(3);
+  });
+
   it('fallback when history was edited (assistant text changed)', () => {
     const hist1 = [sys('s'), user('u1')];
     const a1 = asst('answer one');

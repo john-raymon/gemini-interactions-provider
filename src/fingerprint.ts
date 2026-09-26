@@ -13,6 +13,7 @@ import {
   extractSystemTexts,
   sha256Hex,
 } from './canonicalize.js';
+import { debug, hashPrefix } from './logger.js';
 
 export interface RootHashParams {
   provider: string;
@@ -44,7 +45,10 @@ export function computeResponseContentHash(content: unknown): string {
     : Array.isArray(content)
       ? content
       : [];
-  return sha256Hex(canonicalize(parts.map(canonicalPart)));
+  const normalized = parts
+    .map(canonicalPart)
+    .filter((p): p is NonNullable<typeof p> => p !== null);
+  return sha256Hex(canonicalize(normalized));
 }
 
 export interface ChainWalk {
@@ -87,18 +91,27 @@ export function findContinuation(
   const lastA = walk.lastAssistantIndex;
 
   if (lastA === -1) {
+    const roles = params.messages.map((m) => (m as Record<string, unknown>)?.role);
+    debug(`[plan] miss: no assistant message found (msgs=${params.messages.length} roles=${JSON.stringify(roles)})`);
     return { kind: 'fallback', previousInteractionId: null, deltaStart: 0, chainHashAtEnd: end };
   }
 
   const anchorHash = walk.hashes[lastA];
   const hit = lookup(anchorHash);
   if (!hit) {
+    debug(
+      `[plan] miss: anchor ${hashPrefix(anchorHash)} not in store. rootHash=${hashPrefix(walk.rootHash)} lastA=${lastA} totalMsgs=${params.messages.length}`,
+    );
     return { kind: 'fallback', previousInteractionId: null, deltaStart: 0, chainHashAtEnd: end };
   }
 
   const assistant = params.messages[lastA] as LanguageModelV3Message & { role: 'assistant' };
-  const responseEchoMatches = hit.responseContentHash === computeResponseContentHash(assistant.content);
+  const echoHash = computeResponseContentHash(assistant.content);
+  const responseEchoMatches = hit.responseContentHash === echoHash;
   if (!responseEchoMatches) {
+    debug(
+      `[plan] miss: echo mismatch store=${hashPrefix(hit.responseContentHash)} prompt=${hashPrefix(echoHash)}`,
+    );
     return { kind: 'fallback', previousInteractionId: null, deltaStart: 0, chainHashAtEnd: end };
   }
 
@@ -108,6 +121,10 @@ export function findContinuation(
     return role === 'user' || role === 'tool' || role === 'system';
   });
   if (!tailHasOnlyUserOrTool || tail.filter((m) => (m as Record<string, unknown>)?.role !== 'system').length === 0) {
+    const tailRoles = tail.map((m) => (m as Record<string, unknown>)?.role);
+    debug(
+      `[plan] miss: invalid tail len=${tail.length} tailRoles=${JSON.stringify(tailRoles)}`,
+    );
     return { kind: 'fallback', previousInteractionId: null, deltaStart: 0, chainHashAtEnd: end };
   }
 

@@ -8,7 +8,9 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 
 function isEnabled(): boolean {
-  return /^(1|true|yes)$/i.test(process.env.OD_INTERACTIONS_DEBUG ?? '');
+  const val = process.env.OD_INTERACTIONS_DEBUG?.trim().toLowerCase();
+  if (val === '0' || val === 'false' || val === 'no' || val === 'off') return false;
+  return true;
 }
 
 function sanitize(text: string): string {
@@ -23,12 +25,12 @@ let logDirReady = false;
 function resolveLogFile(): string | null {
   if (logFileCache !== undefined) return logFileCache;
   const raw = process.env.OD_INTERACTIONS_LOG_FILE?.trim();
-  if (!raw) {
-    logFileCache = null;
-    return null;
+  if (raw) {
+    const expanded = raw === '~' ? homedir() : raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw;
+    logFileCache = isAbsolute(expanded) ? expanded : join(process.cwd(), expanded);
+  } else {
+    logFileCache = join(homedir(), '.cache', 'gemini-interactions-provider', 'debug.log');
   }
-  const expanded = raw === '~' ? homedir() : raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw;
-  logFileCache = isAbsolute(expanded) ? expanded : join(process.cwd(), expanded);
   return logFileCache;
 }
 

@@ -15,7 +15,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && pnpm run bundle",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --banner:js=\"import {createRequire as __createRequire} from 'module'; const require = __createRequire(import.meta.url);\" --outfile=dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
@@ -27,6 +28,7 @@
     "@ai-sdk/provider": "^3.0.17",
     "@types/node": "^22.10.2",
     "@types/proper-lockfile": "^4.1.4",
+    "esbuild": "^0.28.2",
     "typescript": "^5.7.2",
     "vitest": "^3.2.1"
   }

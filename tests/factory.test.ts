@@ -80,4 +80,37 @@ describe('end-to-end via stubbed fetch (real @ai-sdk/google conversion)', () => 
     expect((r1.providerMetadata as { google: { interactionId: string } }).google.interactionId).toBe('v1_stub_first');
     expect((r2.providerMetadata as { google: { interactionId: string } }).google.interactionId).toBe('v1_stub_second');
   });
+
+  it('resolves opencode-style {env:VAR} apiKey placeholders defensively', async () => {
+    process.env.GI_TEST_KEY = 'resolved-secret';
+    const dir = mkdtempSync(join(tmpdir(), 'gip-factory-'));
+    dirs.push(dir);
+    let seenKey: string | undefined;
+    const stubFetch: typeof fetch = (async (_input: unknown, init?: { body?: string; headers?: Record<string, string> }) => {
+      seenKey = (init?.headers as Record<string, string> | undefined)?.['x-goog-api-key'];
+      return new Response(
+        JSON.stringify({
+          id: 'v1_env',
+          status: 'completed',
+          steps: [{ type: 'model_output', content: [{ type: 'text', text: 'ok' }] }],
+          usage: { total_tokens: 3, total_input_tokens: 2, total_output_tokens: 1, input_tokens_by_modality: [] },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    const sdk = mod.createGeminiInteractions({ apiKey: '{env:GI_TEST_KEY}', cacheDir: dir, fetch: stubFetch });
+    await sdk.languageModel('gemini-3-flash-preview').doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    });
+    expect(seenKey).toBe('resolved-secret');
+    delete process.env.GI_TEST_KEY;
+  });
+
+  it('drops unresolved {env:VAR} placeholders (never sends the literal as a key)', () => {
+    expect(mod.resolveEnvPlaceholder('{env:GI_DEFINITELY_UNSET_VAR_XYZ}')).toBeUndefined();
+    expect(mod.resolveEnvPlaceholder('plain-key')).toBe('plain-key');
+    expect(mod.resolveEnvPlaceholder(42)).toBeUndefined();
+    const sdk = mod.createGeminiInteractions({ apiKey: '{env:GI_DEFINITELY_UNSET_VAR_XYZ}' });
+    expect(sdk).toBeDefined(); // factory must not throw on missing env
+  });
 });

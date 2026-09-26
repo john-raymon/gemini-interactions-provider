@@ -25,8 +25,26 @@ export interface ChainedSdk {
   languageModel: (modelId: string) => LanguageModelV3;
 }
 
+/** Resolve opencode-style `{env:VAR}` option placeholders. Opencode normally
+ *  interpolates these before calling the factory, but dynamic file:// providers
+ *  may receive the literal string — resolve defensively here as well. */
+export function resolveEnvPlaceholder(val: unknown): string | undefined {
+  if (typeof val !== 'string') return undefined;
+  const match = val.match(/^\{env:(\w+)\}$/);
+  if (!match) return val;
+  return process.env[match[1]] ?? undefined;
+}
+
 export function createGeminiInteractions(options: GeminiInteractionsOptions = {}): ChainedSdk {
   const { cacheDir, store, name: _providerId, ...googleOptions } = options;
+  if (typeof googleOptions.apiKey === 'string' && /^\{env:\w+\}$/.test(googleOptions.apiKey)) {
+    const resolved = resolveEnvPlaceholder(googleOptions.apiKey);
+    // Unresolved placeholder must not flow to the SDK as a literal truthy key:
+    // drop it so @ai-sdk/google falls back to its own env resolution with a
+    // clean "missing key" error instead of a cryptic 400 from Google.
+    if (resolved === undefined) delete googleOptions.apiKey;
+    else googleOptions.apiKey = resolved;
+  }
   const inner = createGoogleGenerativeAI(googleOptions);
   const storeOpts: StoreOptions | undefined = cacheDir ? { dir: cacheDir } : undefined;
   const sharedStore = store ?? new InteractionStore(storeOpts);

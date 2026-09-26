@@ -32,6 +32,19 @@ function ensureStore(store: InteractionStore): Promise<void> {
  *  interactions must never be registered (they'd poison the next call with a 400). */
 const ALLOWED_FINISH_UNIFIED = new Set(['stop', 'tool-calls', 'length']);
 
+/** v3 usage shape is { inputTokens: {total}, outputTokens: {total}, ... };
+ *  accept raw/alternate shapes defensively for logging only. */
+function usageTotal(usage: unknown, bucket: 'inputTokens' | 'outputTokens'): number | string {
+  const u = usage as Record<string, unknown> | undefined;
+  if (!u) return '?';
+  if (bucket === 'inputTokens') {
+    const v = (u.inputTokens as { total?: number } | undefined)?.total ?? u.promptTokens ?? u.promptTokenCount;
+    return typeof v === 'number' ? v : '?';
+  }
+  const v = (u.outputTokens as { total?: number } | undefined)?.total ?? u.completionTokens ?? u.candidatesTokenCount;
+  return typeof v === 'number' ? v : '?';
+}
+
 type ContentPart = Record<string, unknown>;
 type Slot = { kind: 'text' | 'reasoning'; text: string } | { kind: 'tool-call'; part: ContentPart };
 
@@ -118,6 +131,9 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
     const id = (result.providerMetadata as Record<string, Record<string, unknown>> | undefined)?.google
       ?.interactionId as string | undefined;
     const finishUnified = (result.finishReason as Record<string, unknown> | undefined)?.unified as string | undefined;
+    debug(
+      `generate complete input=${usageTotal(result.usage, 'inputTokens')} output=${usageTotal(result.usage, 'outputTokens')} id=${idSuffix(id)}`,
+    );
     await this.register(plan.chainHashAtEnd, result.content, id, options.abortSignal, finishUnified);
     return result;
   }
@@ -211,6 +227,9 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
             const finishInteractionId = (p.providerMetadata as Record<string, Record<string, unknown>> | undefined)
               ?.google?.interactionId as string | undefined;
             const finishUnified = (p.finishReason as Record<string, unknown> | undefined)?.unified as string | undefined;
+            debug(
+              `stream finish input=${usageTotal(p.usage, 'inputTokens')} output=${usageTotal(p.usage, 'outputTokens')} id=${idSuffix(finishInteractionId)}`,
+            );
             // Register NOW: consumers that break on 'finish' cancel the readable side,
             // which skips flush() entirely and would silently lose the anchor.
             settlement = this.register(chainHashAtEnd, this.assemble(slots), finishInteractionId, signal, finishUnified);

@@ -1,0 +1,32 @@
+{
+  "name": "gemini-interactions-provider",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LanguageModelV3 wrapper that routes Gemini traffic through the Interactions API with automatic previous_interaction_id state chaining.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2"
+  },
+  "devDependencies": {
+    "@ai-sdk/provider": "^3.0.17",
+    "@types/node": "^22.10.2",
+    "@types/proper-lockfile": "^4.1.4",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.1"
+  }
+}

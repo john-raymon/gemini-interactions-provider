@@ -1,0 +1,148 @@
+// Deterministic canonicalization of LanguageModelV3 messages for fingerprinting.
+// Strict WHITELIST for known part types (never trust extra fields); volatile-key
+// denylist for unknown part types so forward-compat parts still hash meaningfully.
+import { createHash } from 'node:crypto';
+
+export function sha256Hex(data: string | Uint8Array): string {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+const VOLATILE_KEYS = new Set(['providerOptions', 'providerMetadata', 'createdAt', 'id']);
+
+/** Recursively normalize a JSON-ish value: sorted keys, undefined dropped,
+ *  non-finite numbers -> null, -0 -> 0, binary -> {__bin: sha256}, URL -> href. */
+export function normalize(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  const t = typeof value;
+  if (t === 'string' || t === 'boolean') return value;
+  if (t === 'number') {
+    if (!Number.isFinite(value as number)) return null;
+    if (Object.is(value, -0)) return 0;
+    return value;
+  }
+  if (t === 'bigint') return (value as bigint).toString();
+  if (t === 'function' || t === 'symbol') return String(value);
+  if (value instanceof URL) return value.href;
+  if (value instanceof Uint8Array) return { __bin: sha256Hex(value) };
+  if (Array.isArray(value)) {
+    // Preserve positional integrity: undefined/null out-of-flow shifts would collide.
+    return value.map((item) => (item === undefined ? null : normalize(item)));
+  }
+  if (t === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      const n = normalize((value as Record<string, unknown>)[key]);
+      if (n !== undefined) out[key] = n;
+    }
+    return out;
+  }
+  return value;
+}
+
+export function canonicalize(value: unknown): string {
+  return JSON.stringify(normalize(value));
+}
+
+function parseIfJsonString(v: unknown): unknown {
+  if (typeof v !== 'string') return v;
+  const trimmed = v.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return v;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return v;
+  }
+}
+
+export function canonicalPart(part: unknown): unknown {
+  const p = part as Record<string, unknown>;
+  switch (p?.type) {
+    case 'text':
+      return { type: 'text', text: p.text ?? '' };
+    case 'reasoning':
+      // Thought signatures intentionally stripped (transport crypto, not content).
+      return { type: 'reasoning', text: p.text ?? '' };
+    case 'file':
+      return {
+        type: 'file',
+        ...(p.filename != null ? { filename: p.filename } : {}),
+        mediaType: p.mediaType ?? p.mimeType ?? null,
+        data: p.data ?? null,
+      };
+    case 'image':
+      // legacy alias -> normalize to file
+      return { type: 'file', mediaType: p.mediaType ?? p.mimeType ?? 'image/*', data: p.image ?? p.data ?? null };
+    case 'tool-call':
+      return {
+        type: 'tool-call',
+        toolCallId: p.toolCallId ?? '',
+        toolName: p.toolName ?? '',
+        args: parseIfJsonString(p.args ?? p.input ?? p.arguments ?? null),
+        ...(p.providerExecuted ? { providerExecuted: true } : {}),
+      };
+    case 'tool-result':
+      return {
+        type: 'tool-result',
+        toolCallId: p.toolCallId ?? '',
+        toolName: p.toolName ?? '',
+        output: p.output ?? p.result ?? null,
+        isError: Boolean(p.isError),
+      };
+    default: {
+      const out: Record<string, unknown> = { type: p?.type ?? 'unknown' };
+      if (p && typeof p === 'object') {
+        for (const key of Object.keys(p)) {
+          if (key === 'type' || VOLATILE_KEYS.has(key)) continue;
+          out[key] = p[key];
+        }
+      }
+      return out;
+    }
+  }
+}
+
+export function canonicalMessage(message: unknown): unknown {
+  const m = message as Record<string, unknown>;
+  if (m?.role === 'system') {
+    return { role: 'system', content: typeof m.content === 'string' ? m.content : String(m.content ?? '') };
+  }
+  const content = Array.isArray(m?.content) ? m.content.map(canonicalPart) : (m?.content ?? null);
+  return { role: m?.role ?? 'unknown', content };
+}
+
+export function canonicalMessageJson(message: unknown): string {
+  return canonicalize(canonicalMessage(message));
+}
+
+export function extractSystemTexts(messages: unknown[]): string[] {
+  const texts: string[] = [];
+  for (const m of messages) {
+    const role = (m as Record<string, unknown>)?.role;
+    if (role === 'system') {
+      const content = (m as Record<string, unknown>).content;
+      texts.push(typeof content === 'string' ? content : String(content ?? ''));
+    }
+  }
+  return texts;
+}
+
+/** Tools normalized (recursive key sort via canonicalize later) and sorted by name -> stable H0 input.
+ *  Accepts arrays or Record<string, tool>; handles function and provider-defined shapes. */
+export function canonicalTools(tools: unknown[] | Record<string, unknown> | null | undefined): unknown[] | null {
+  if (tools == null) return null;
+  const list = Array.isArray(tools) ? tools : Object.values(tools);
+  const normalized = list.map((t) => {
+    const tool = t as Record<string, unknown>;
+    if (tool?.type === 'provider-defined') {
+      return { type: 'provider-defined', id: tool.id ?? null, name: tool.name ?? null, args: tool.args ?? null };
+    }
+    return {
+      type: tool?.type ?? 'function',
+      name: tool?.name ?? null,
+      description: tool?.description ?? '',
+      inputSchema: tool?.inputSchema ?? tool?.parameters ?? {},
+    };
+  });
+  normalized.sort((a, b) => String((a as { name: unknown }).name).localeCompare(String((b as { name: unknown }).name)));
+  return normalized as unknown[];
+}

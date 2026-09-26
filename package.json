@@ -20,6 +20,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ai-sdk/google": "3.0.127",
     "proper-lockfile": "^4.1.2"
   },
   "devDependencies": {

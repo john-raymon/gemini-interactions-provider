@@ -292,6 +292,69 @@ describe('doStream', () => {
     expect(store.lookup(anchor)).toBeUndefined();
     expect(parts.map((p: unknown) => (p as { type: string }).type)).toContain('finish');
   });
+  it('continuation stream error part -> invalidates anchor, retries full prompt stream, succeeds', async () => {
+    let callCount = 0;
+    const calls: LanguageModelV3CallOptions[] = [];
+    const brokenStream = {
+      specificationVersion: 'v3',
+      provider: PROVIDER,
+      modelId: MODEL,
+      supportedUrls: {},
+      doGenerate: async () => ({}),
+      doStream: async (options: LanguageModelV3CallOptions) => {
+        callCount++;
+        calls.push(options);
+        if (callCount === 1) {
+          // Continuation call: returns a stream that emits an error part
+          return {
+            stream: new ReadableStream<LanguageModelV3StreamPart>({
+              start(c) {
+                c.enqueue({
+                  type: 'error',
+                  error: { message: "Please ensure that function response turn comes immediately after a function call turn." },
+                });
+              },
+            }),
+          };
+        }
+        // Fallback call: returns clean parts
+        return {
+          stream: new ReadableStream<LanguageModelV3StreamPart>({
+            start(c) {
+              c.enqueue({ type: 'stream-start', warnings: [] });
+              c.enqueue({ type: 'text-start', id: 't1' });
+              c.enqueue({ type: 'text-delta', id: 't1', delta: 'rescued!' });
+              c.enqueue({ type: 'finish', finishReason: { unified: 'stop', raw: {} }, usage: { inputTokens: { total: 10 }, outputTokens: { total: 2 } }, providerMetadata: { google: { interactionId: 'v1_rescued' } } });
+              c.close();
+            },
+          }),
+        };
+      },
+    } as unknown as LanguageModelV3;
+
+    const dir = mkdtempSync(join(tmpdir(), 'gip-rescue-'));
+    dirs.push(dir);
+    const store = new InteractionStore({ dir });
+    const h1 = [sys('s'), user('u1')];
+    const a1 = asst('a1');
+    await seed(store, h1, a1.content);
+    const anchor = walkChain({ provider: PROVIDER, modelId: MODEL, messages: [...h1, a1] }).chainHashAtEnd;
+
+    const wrapped = new ChainedInteractionsModel(brokenStream, store);
+    const { stream } = await wrapped.doStream(opts({ prompt: [...h1, a1, user('u2')] }));
+    const parts = await readAll(stream);
+
+    expect(calls).toHaveLength(2);
+    // Call 1 was sliced continuation
+    expect(calls[0].prompt).toEqual([sys('s'), user('u2')]);
+    // Call 2 was full prompt fallback
+    expect(calls[1].prompt).toEqual([...h1, a1, user('u2')]);
+    // Anchor was invalidated
+    expect(store.lookup(anchor)).toBeUndefined();
+    // Caller received clean stream with NO error
+    expect(parts.map((p) => p.type)).toEqual(['stream-start', 'text-start', 'text-delta', 'finish']);
+  });
+
 
   it('no registration when the stream errors mid-flight', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gip-lm-'));

@@ -9,7 +9,7 @@ import type {
   LanguageModelV3StreamResult,
 } from '@ai-sdk/provider';
 import type { InteractionStore } from './store.js';
-import type { ContinuationResult } from './types.js';
+import type { ContinuationHit, ContinuationResult } from './types.js';
 import { buildContinuationParams } from './matcher.js';
 import {
   checkpointHashAfterResponse,
@@ -146,26 +146,167 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
 
   async doStream(options: LanguageModelV3CallOptions): Promise<LanguageModelV3StreamResult> {
     const plan = await this.plan(options);
-    let out: LanguageModelV3StreamResult;
-    if (plan.kind === 'hit') {
-      debug(`stream continuation hit prevId=${idSuffix(plan.previousInteractionId)}`);
-      try {
-        out = await this.inner.doStream(buildContinuationParams(options, plan));
-      } catch (err) {
-        // Bootstrap guard: interactions API rejects before the stream object exists.
-        if (!ChainedInteractionsModel.isStale400(err, options.abortSignal)) throw err;
-        debug('stale interaction id at stream bootstrap; invalidating and retrying full prompt');
-        await this.store.invalidate(plan.anchorHash);
-        out = await this.inner.doStream(options);
-      }
-    } else {
-      out = await this.inner.doStream(options);
+    if (plan.kind !== 'hit') {
+      const out = await this.inner.doStream(options);
+      return {
+        ...out,
+        stream: out.stream.pipeThrough(this.registrationTransform(plan.chainHashAtEnd, options.abortSignal)),
+      };
     }
+
+    debug(`stream continuation hit prevId=${idSuffix(plan.previousInteractionId)}`);
+    let out: LanguageModelV3StreamResult;
+    try {
+      out = await this.inner.doStream(buildContinuationParams(options, plan));
+    } catch (err) {
+      if (!ChainedInteractionsModel.isStale400(err, options.abortSignal)) throw err;
+      debug('stale interaction id at stream bootstrap; invalidating and retrying full prompt');
+      await this.store.invalidate(plan.anchorHash);
+      const fallback = await this.inner.doStream(options);
+      return {
+        ...fallback,
+        stream: fallback.stream.pipeThrough(this.registrationTransform(plan.chainHashAtEnd, options.abortSignal)),
+      };
+    }
+
+    const stream = this.createResilientStream(out.stream, options, plan);
     return {
       ...out,
-      stream: out.stream.pipeThrough(this.registrationTransform(plan.chainHashAtEnd, options.abortSignal)),
+      stream,
     };
   }
+  private createResilientStream(
+    source: ReadableStream<LanguageModelV3StreamPart>,
+    options: LanguageModelV3CallOptions,
+    plan: ContinuationHit,
+  ): ReadableStream<LanguageModelV3StreamPart> {
+    const store = this.store;
+    const inner = this.inner;
+    const registerFn = this.register.bind(this);
+    const assembleFn = this.assemble.bind(this);
+    const signal = options.abortSignal;
+
+    return new ReadableStream<LanguageModelV3StreamPart>({
+      async start(controller) {
+        let currentReader = source.getReader();
+        let isFallback = false;
+        let hasEmittedContent = false;
+        let chainHashAtEnd = plan.chainHashAtEnd;
+        const slots: Slot[] = [];
+        const slotIndexById = new Map<string, number>();
+
+        const openSlot = (id: string, kind: 'text' | 'reasoning'): void => {
+          slotIndexById.set(id, slots.push({ kind, text: '' }) - 1);
+        };
+        const appendDelta = (id: string, delta: unknown): void => {
+          const i = slotIndexById.get(id);
+          if (i !== undefined) {
+            const slot = slots[i];
+            if (slot.kind === 'text' || slot.kind === 'reasoning') slot.text += String(delta ?? '');
+          }
+        };
+
+        const switchToFallback = async (reason: string): Promise<boolean> => {
+          if (isFallback || hasEmittedContent || signal?.aborted) return false;
+          debug(`continuation stream failed (${reason}); invalidating anchor and retrying full prompt`);
+          try {
+            await currentReader.cancel();
+          } catch {}
+          await store.invalidate(plan.anchorHash);
+          isFallback = true;
+          slots.length = 0;
+          slotIndexById.clear();
+          chainHashAtEnd = plan.chainHashAtEnd;
+          try {
+            const fallbackResult = await inner.doStream(options);
+            currentReader = fallbackResult.stream.getReader();
+            return true;
+          } catch (err) {
+            controller.error(err);
+            return false;
+          }
+        };
+
+        try {
+          while (true) {
+            let readResult: ReadableStreamReadResult<LanguageModelV3StreamPart>;
+            try {
+              readResult = await currentReader.read();
+            } catch (err) {
+              const rescued = await switchToFallback(err instanceof Error ? err.message : String(err));
+              if (rescued) continue;
+              controller.error(err);
+              return;
+            }
+
+            const { done, value } = readResult;
+            if (done) {
+              controller.close();
+              break;
+            }
+
+            const p = value as Record<string, unknown>;
+
+            if (p.type === 'error' && !hasEmittedContent && !isFallback) {
+              const errPayload = p.error as { message?: string; code?: string } | undefined;
+              const msg = errPayload?.message ?? JSON.stringify(p.error);
+              const rescued = await switchToFallback(msg);
+              if (rescued) continue;
+            }
+
+            if (p.type === 'text-delta' || p.type === 'tool-call') {
+              hasEmittedContent = true;
+            }
+
+            switch (p.type) {
+              case 'text-start':
+                openSlot(String(p.id), 'text');
+                break;
+              case 'reasoning-start':
+                openSlot(String(p.id), 'reasoning');
+                break;
+              case 'text-delta':
+              case 'reasoning-delta':
+                appendDelta(String(p.id), p.delta);
+                break;
+              case 'tool-call': {
+                let input = p.input;
+                if (typeof input === 'string') {
+                  try {
+                    input = JSON.parse(input);
+                  } catch {
+                    input = p.input;
+                  }
+                }
+                slots.push({
+                  kind: 'tool-call',
+                  part: { type: 'tool-call', toolCallId: p.toolCallId as string, toolName: p.toolName as string, input },
+                });
+                break;
+              }
+              case 'finish': {
+                const finishInteractionId = (p.providerMetadata as Record<string, Record<string, unknown>> | undefined)
+                  ?.google?.interactionId as string | undefined;
+                const finishUnified = (p.finishReason as Record<string, unknown> | undefined)?.unified as string | undefined;
+                debug(
+                  `stream finish input=${usageTotal(p.usage, 'inputTokens')} output=${usageTotal(p.usage, 'outputTokens')} id=${idSuffix(finishInteractionId)}`,
+                );
+                await registerFn(chainHashAtEnd, assembleFn(slots), finishInteractionId, signal, finishUnified);
+                break;
+              }
+              default:
+                break;
+            }
+
+            controller.enqueue(value);
+          }
+        } catch (err) {
+          controller.error(err);
+        }
+      },
+    });
+  }
+
 
   /** Assemble slot buffers into the same content[] shape doGenerate returns. */
   private assemble(slots: Slot[]): ContentPart[] {

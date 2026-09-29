@@ -294,6 +294,7 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
               hasEmittedContent = true;
             }
 
+            let valueToEnqueue = value;
             switch (p.type) {
               case 'text-start':
                 openSlot(String(p.id), 'text');
@@ -306,18 +307,38 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
                 appendDelta(String(p.id), p.delta);
                 break;
               case 'tool-call': {
-                let input = p.input;
-                if (typeof input === 'string') {
+                const toolName = (p.toolName ?? '') as string;
+                const toolCallId = (p.toolCallId ?? '') as string;
+                const rawArgs = p.input !== undefined ? p.input : p.args;
+
+                let parsedArgs = rawArgs;
+                if (typeof rawArgs === 'string') {
                   try {
-                    input = JSON.parse(input);
+                    parsedArgs = JSON.parse(rawArgs);
                   } catch {
-                    input = p.input;
+                    parsedArgs = rawArgs;
                   }
                 }
+
+                const isObjectArgs = parsedArgs !== null && typeof parsedArgs === 'object';
+                const normalized = isObjectArgs ? normalizeToolArgs(toolName, parsedArgs) : parsedArgs;
+                const normalizedStr = typeof normalized === 'string' ? normalized : JSON.stringify(normalized ?? {});
+
                 slots.push({
                   kind: 'tool-call',
-                  part: { type: 'tool-call', toolCallId: p.toolCallId as string, toolName: p.toolName as string, input },
+                  part: {
+                    type: 'tool-call',
+                    toolCallId,
+                    toolName,
+                    input: isObjectArgs ? normalized : normalizedStr,
+                  },
                 });
+
+                valueToEnqueue = {
+                  ...p,
+                  input: normalizedStr,
+                  ...(p.args !== undefined ? { args: typeof p.args === 'string' ? normalizedStr : normalized } : {}),
+                } as LanguageModelV3StreamPart;
                 break;
               }
               case 'finish': {
@@ -334,7 +355,7 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
                 break;
             }
 
-            controller.enqueue(value);
+            controller.enqueue(valueToEnqueue);
           }
         } catch (err) {
           controller.error(err);
@@ -378,7 +399,7 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
 
     return new TransformStream<LanguageModelV3StreamPart, LanguageModelV3StreamPart>({
       transform: (part, controller) => {
-        controller.enqueue(part);
+        let partToEnqueue = part;
         const p = part as Record<string, unknown>;
         switch (p.type) {
           case 'text-start':
@@ -392,18 +413,38 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
             appendDelta(String(p.id), p.delta);
             break;
           case 'tool-call': {
-            let input = p.input;
-            if (typeof input === 'string') {
+            const toolName = (p.toolName ?? '') as string;
+            const toolCallId = (p.toolCallId ?? '') as string;
+            const rawArgs = p.input !== undefined ? p.input : p.args;
+
+            let parsedArgs = rawArgs;
+            if (typeof rawArgs === 'string') {
               try {
-                input = JSON.parse(input);
+                parsedArgs = JSON.parse(rawArgs);
               } catch {
-                input = p.input;
+                parsedArgs = rawArgs;
               }
             }
+
+            const isObjectArgs = parsedArgs !== null && typeof parsedArgs === 'object';
+            const normalized = isObjectArgs ? normalizeToolArgs(toolName, parsedArgs) : parsedArgs;
+            const normalizedStr = typeof normalized === 'string' ? normalized : JSON.stringify(normalized ?? {});
+
             slots.push({
               kind: 'tool-call',
-              part: { type: 'tool-call', toolCallId: p.toolCallId, toolName: p.toolName, input },
+              part: {
+                type: 'tool-call',
+                toolCallId,
+                toolName,
+                input: isObjectArgs ? normalized : normalizedStr,
+              },
             });
+
+            partToEnqueue = {
+              ...p,
+              input: normalizedStr,
+              ...(p.args !== undefined ? { args: typeof p.args === 'string' ? normalizedStr : normalized } : {}),
+            } as LanguageModelV3StreamPart;
             break;
           }
           case 'finish': {
@@ -421,6 +462,8 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
           default:
             break;
         }
+
+        controller.enqueue(partToEnqueue);
       },
       flush: async (): Promise<void> => {
         // flush() never runs if the upstream stream errored/cancelled.

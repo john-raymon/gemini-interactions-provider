@@ -316,6 +316,41 @@ describe('doStream', () => {
     ]));
   });
 
+  it('normalizes tool-call parameter aliases in doStream and updates both chunk and checkpoint', async () => {
+    const aliasedParts = [
+      { type: 'stream-start', warnings: [] },
+      { type: 'tool-call', toolCallId: 'c1', toolName: 'read', input: JSON.stringify({ file_path: '/src/a.ts', offset: 1 }) },
+      {
+        type: 'finish',
+        finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+        usage: {},
+        providerMetadata: { google: { interactionId: 'v1_stream_alias' } },
+      },
+    ];
+    const { store, wrapped } = await setup([{ kind: 'stream', parts: aliasedParts }]);
+    const { stream } = await wrapped.doStream(opts({ prompt: [sys('s'), user('read file')] }));
+    const parts = (await readAll(stream)) as Record<string, unknown>[];
+
+    // Tool call chunk emitted to consumer is normalized
+    const toolCallPart = parts.find((p) => p.type === 'tool-call') as { type: string; input: string };
+    expect(toolCallPart).toBeDefined();
+    expect(JSON.parse(toolCallPart.input)).toEqual({ filePath: '/src/a.ts', offset: 1 });
+
+    // Checkpoint in store reflects normalized arguments
+    const end = walkChain({ provider: PROVIDER, modelId: MODEL, messages: [sys('s'), user('read file')] }).chainHashAtEnd;
+    const expectedCpHash = checkpointHashAfterResponse(end, [
+      {
+        type: 'tool-call',
+        toolCallId: 'c1',
+        toolName: 'read',
+        input: JSON.stringify({ filePath: '/src/a.ts', offset: 1 }),
+      },
+    ]);
+    const cp = store.lookup(expectedCpHash);
+    expect(cp).toBeDefined();
+    expect(cp?.interactionId).toBe('v1_stream_alias');
+  });
+
   it('bootstrap 400 on hit -> invalidate + full-prompt retry stream', async () => {
     const { store, wrapped, calls } = await setup([
       { kind: 'stream', error: err400() },

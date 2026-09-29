@@ -17,6 +17,7 @@ import {
   findContinuation,
 } from './fingerprint.js';
 import { debug, hashPrefix, idSuffix } from './logger.js';
+import { normalizeToolArgs } from './tool-alias.js';
 
 const initMap = new WeakMap<InteractionStore, Promise<void>>();
 function ensureStore(store: InteractionStore): Promise<void> {
@@ -137,6 +138,41 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
     const id = (result.providerMetadata as Record<string, Record<string, unknown>> | undefined)?.google
       ?.interactionId as string | undefined;
     const finishUnified = (result.finishReason as Record<string, unknown> | undefined)?.unified as string | undefined;
+
+    const normalizedContent = Array.isArray(result.content) ? result.content.map((part) => {
+      if (part.type === 'tool-call') {
+        const toolCall = part as {
+          type: 'tool-call';
+          toolCallId: string;
+          toolName: string;
+          input?: unknown;
+          args?: unknown;
+        };
+        try {
+          const rawArgs = toolCall.input ?? toolCall.args;
+          const normalized = normalizeToolArgs(toolCall.toolName, rawArgs);
+          const normalizedStr = typeof normalized === 'string' ? normalized : JSON.stringify(normalized ?? {});
+
+          return {
+            ...part,
+            input: normalizedStr,
+            ...(toolCall.args !== undefined
+              ? { args: typeof toolCall.args === 'string' ? normalizedStr : normalized }
+              : {}),
+          };
+        } catch (err) {
+          debug(`Failed to normalize tool args for ${toolCall.toolName}:`, err);
+          return part;
+        }
+      }
+      return part;
+    }) : result.content;
+
+    result = {
+      ...result,
+      content: normalizedContent,
+    };
+
     debug(
       `generate complete input=${usageTotal(result.usage, 'inputTokens')} output=${usageTotal(result.usage, 'outputTokens')} id=${idSuffix(id)}`,
     );

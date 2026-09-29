@@ -225,6 +225,49 @@ describe('doGenerate', () => {
     const result = await wrapped.doGenerate(opts({ prompt: [sys('s'), user('u1')] }));
     expect((result.content as Array<{ text: string }>)[0].text).toBe('ok');
   });
+  it('normalizes tool-call parameter aliases in doGenerate and registers canonical checkpoint', async () => {
+    const toolStep: FakeStep = {
+      kind: 'generate',
+      result: {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'call_1',
+            toolName: 'read',
+            input: JSON.stringify({ file_path: '/src/file.ts', offset: 5 }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+        usage: {},
+        warnings: [],
+        providerMetadata: { google: { interactionId: 'v1_tool' } },
+      },
+    };
+    const { store, wrapped } = await setup([toolStep]);
+    const res = await wrapped.doGenerate(opts({ prompt: [sys('s'), user('read file')] }));
+
+    // Caller receives normalized stringified parameters
+    const content = res.content as Array<{ type: string; toolCallId: string; toolName: string; input: string }>;
+    expect(content[0].type).toBe('tool-call');
+    expect(content[0].toolCallId).toBe('call_1');
+    expect(content[0].toolName).toBe('read');
+    expect(JSON.parse(content[0].input)).toEqual({ filePath: '/src/file.ts', offset: 5 });
+
+    // Checkpoint in store reflects canonical arguments
+    const end = walkChain({ provider: PROVIDER, modelId: MODEL, messages: [sys('s'), user('read file')] }).chainHashAtEnd;
+    const expectedCpHash = checkpointHashAfterResponse(end, [
+      {
+        type: 'tool-call',
+        toolCallId: 'call_1',
+        toolName: 'read',
+        input: JSON.stringify({ filePath: '/src/file.ts', offset: 5 }),
+      },
+    ]);
+    const cp = store.lookup(expectedCpHash);
+    expect(cp).toBeDefined();
+    expect(cp?.interactionId).toBe('v1_tool');
+  });
+
 });
 
 const STREAM_PARTS = (id: string): Record<string, unknown>[] => [

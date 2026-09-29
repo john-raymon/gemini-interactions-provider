@@ -86,6 +86,7 @@ export {
   type ChainWalk,
   type RootHashParams,
 } from './fingerprint.js';
+export { normalizeToolArgs } from './tool-alias.js';
 export { ChainedInteractionsModel } from './language-model.js';
 export { buildContinuationParams, deepMerge } from './matcher.js';
 export { debug } from './logger.js';

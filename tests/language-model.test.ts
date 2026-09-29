@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { LanguageModelV3, LanguageModelV3CallOptions } from '@ai-sdk/provider';
+import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3StreamPart } from '@ai-sdk/provider';
 import { ChainedInteractionsModel } from '../src/language-model.js';
 import { InteractionStore } from '../src/store.js';
 import {
@@ -324,7 +324,12 @@ describe('doStream', () => {
               c.enqueue({ type: 'stream-start', warnings: [] });
               c.enqueue({ type: 'text-start', id: 't1' });
               c.enqueue({ type: 'text-delta', id: 't1', delta: 'rescued!' });
-              c.enqueue({ type: 'finish', finishReason: { unified: 'stop', raw: {} }, usage: { inputTokens: { total: 10 }, outputTokens: { total: 2 } }, providerMetadata: { google: { interactionId: 'v1_rescued' } } });
+              c.enqueue({
+                type: 'finish',
+                finishReason: { unified: 'stop', raw: 'stop' },
+                usage: { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 2, text: 2, reasoning: 0 } },
+                providerMetadata: { google: { interactionId: 'v1_rescued' } },
+              } as LanguageModelV3StreamPart);
               c.close();
             },
           }),
@@ -352,7 +357,7 @@ describe('doStream', () => {
     // Anchor was invalidated
     expect(store.lookup(anchor)).toBeUndefined();
     // Caller received clean stream with NO error
-    expect(parts.map((p) => p.type)).toEqual(['stream-start', 'text-start', 'text-delta', 'finish']);
+    expect(parts.map((p: any) => p.type)).toEqual(['stream-start', 'text-start', 'text-delta', 'finish']);
   });
 
 

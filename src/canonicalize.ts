@@ -2,6 +2,7 @@
 // Strict WHITELIST for known part types (never trust extra fields); volatile-key
 // denylist for unknown part types so forward-compat parts still hash meaningfully.
 import { createHash } from 'node:crypto';
+import { normalizeToolArgs } from './tool-alias.js';
 
 export function sha256Hex(data: string | Uint8Array): string {
   return createHash('sha256').update(data).digest('hex');
@@ -81,14 +82,23 @@ export function canonicalPart(part: unknown): unknown | null {
     case 'image':
       // legacy alias -> normalize to file
       return { type: 'file', mediaType: p.mediaType ?? p.mimeType ?? 'image/*', data: p.image ?? p.data ?? null };
-    case 'tool-call':
+    case 'tool-call': {
+      const toolName = (typeof p.toolName === 'string' ? p.toolName : typeof p.name === 'string' ? p.name : '').trim();
+      const rawArgs = p.args ?? p.input ?? p.arguments ?? null;
+      const parsedArgs = parseIfJsonString(rawArgs);
+      const isPlainRecord = parsedArgs !== null && typeof parsedArgs === 'object' && !Array.isArray(parsedArgs);
+      const normalizedArgs =
+        toolName.length > 0 && isPlainRecord
+          ? normalizeToolArgs(toolName, parsedArgs as Record<string, unknown>)
+          : parsedArgs;
       return {
         type: 'tool-call',
         toolCallId: p.toolCallId ?? '',
-        toolName: p.toolName ?? '',
-        args: parseIfJsonString(p.args ?? p.input ?? p.arguments ?? null),
+        toolName: p.toolName ?? toolName,
+        args: normalizedArgs,
         ...(p.providerExecuted ? { providerExecuted: true } : {}),
       };
+    }
     case 'tool-result':
       return {
         type: 'tool-result',

@@ -72,6 +72,36 @@ describe('canonicalMessage whitelist matrix', () => {
     const legacy = canonicalMessage({ role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'c', toolName: 't', args: { x: 1 } }] });
     expect(v3).toEqual(legacy);
   });
+  it('normalizes tool argument aliases (file_path -> filePath, search_pattern -> pattern) to identical canonical hashes', () => {
+    const withAlias = canonicalMessage({
+      role: 'assistant',
+      content: [{ type: 'tool-call', toolCallId: 'c', toolName: 'read', input: { file_path: '/src/a.ts', offset: 10 } }],
+    });
+    const withCanonical = canonicalMessage({
+      role: 'assistant',
+      content: [{ type: 'tool-call', toolCallId: 'c', toolName: 'read', input: { filePath: '/src/a.ts', offset: 10 } }],
+    });
+    expect(withAlias).toEqual(withCanonical);
+    expect(canonicalMessageJson({
+      role: 'assistant',
+      content: [{ type: 'tool-call', toolCallId: 'c', toolName: 'read', input: { file_path: '/src/a.ts', offset: 10 } }],
+    })).toBe(canonicalMessageJson({
+      role: 'assistant',
+      content: [{ type: 'tool-call', toolCallId: 'c', toolName: 'read', input: { filePath: '/src/a.ts', offset: 10 } }],
+    }));
+
+    // Test grep search_pattern
+    const grepAlias = canonicalMessageJson({
+      role: 'assistant',
+      content: [{ type: 'tool-call', toolCallId: 'c', toolName: 'grep', input: { search_pattern: 'hello', path: 'src' } }],
+    });
+    const grepCanonical = canonicalMessageJson({
+      role: 'assistant',
+      content: [{ type: 'tool-call', toolCallId: 'c', toolName: 'grep', input: { pattern: 'hello', path: 'src' } }],
+    });
+    expect(grepAlias).toBe(grepCanonical);
+  });
+
 
   it('tool-result isError has a stable default for cross-version equality', () => {
     const v3 = canonicalMessage({ role: 'tool', content: [{ type: 'tool-result', toolCallId: 'c', toolName: 't', output: { type: 'text', value: 'v' } }] });

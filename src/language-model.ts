@@ -18,6 +18,19 @@ import {
 } from './fingerprint.js';
 import { debug, hashPrefix, idSuffix } from './logger.js';
 import { normalizeToolArgs } from './tool-alias.js';
+import { encodePromptSignature, findStepViolations } from './step-signature.js';
+
+type PlanResult = ContinuationResult & { promptSig: string };
+
+function errLabel(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
+
+/** Error-path telemetry: what failed plus the prompt's structural signature
+ *  (computed once at plan time; never recomputed on the hot path). */
+function logRequestFailed(label: string, err: unknown, sig: string): void {
+  debug(`request failed (${label}): ${errLabel(err)} sig=${sig}`);
+}
 
 const initMap = new WeakMap<InteractionStore, Promise<void>>();
 function ensureStore(store: InteractionStore): Promise<void> {
@@ -72,15 +85,24 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
     return (this.inner as { defaultObjectGenerationMode?: unknown }).defaultObjectGenerationMode;
   }
 
-  private async plan(options: LanguageModelV3CallOptions): Promise<ContinuationResult> {
+  private async plan(options: LanguageModelV3CallOptions): Promise<PlanResult> {
     await ensureStore(this.store);
     const toolsCount = Array.isArray(options.tools)
       ? options.tools.length
       : options.tools
         ? Object.keys(options.tools).length
         : 0;
-    debug(`[plan] promptMsgs=${options.prompt?.length ?? 0} toolsCount=${toolsCount} model=${this.inner.modelId}`);
-    return findContinuation(
+    const promptSig = encodePromptSignature(options.prompt as unknown[]);
+    debug(`[plan] promptMsgs=${options.prompt?.length ?? 0} toolsCount=${toolsCount} model=${this.inner.modelId} sig=${promptSig}`);
+    const violations = findStepViolations(options.prompt as unknown[]);
+    if (violations.length > 0) {
+      debug(
+        `[sig-violation] ${violations
+          .map((v) => `${v.kind}@msg${v.messageIndex}${v.partIndex !== undefined ? `.part${v.partIndex}` : ''}`)
+          .join(', ')}`,
+      );
+    }
+    const result = await findContinuation(
       {
         provider: this.inner.provider,
         modelId: this.inner.modelId,
@@ -89,6 +111,7 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
       },
       (h) => this.store.lookup(h),
     );
+    return { ...result, promptSig };
   }
 
   private static isStale400(err: unknown, signal?: AbortSignal | null): boolean {
@@ -123,17 +146,31 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
     const plan = await this.plan(options);
     let result: LanguageModelV3GenerateResult;
     if (plan.kind === 'hit') {
-      debug(`continuation hit prevId=${idSuffix(plan.previousInteractionId)} tail=${options.prompt.length - plan.deltaStart} msg(s)`);
+      const contParams = buildContinuationParams(options, plan);
+      debug(
+        `continuation hit prevId=${idSuffix(plan.previousInteractionId)} tail=${options.prompt.length - plan.deltaStart} msg(s) delta=${encodePromptSignature(contParams.prompt as unknown[])}`,
+      );
       try {
-        result = await this.inner.doGenerate(buildContinuationParams(options, plan));
+        result = await this.inner.doGenerate(contParams);
       } catch (err) {
+        logRequestFailed('generate continuation', err, plan.promptSig);
         if (!ChainedInteractionsModel.isStale400(err, options.abortSignal)) throw err;
         debug('stale interaction id detected; invalidating and retrying full prompt');
         await this.store.invalidate(plan.anchorHash);
-        result = await this.inner.doGenerate(options);
+        try {
+          result = await this.inner.doGenerate(options);
+        } catch (retryErr) {
+          logRequestFailed('generate full prompt retry', retryErr, plan.promptSig);
+          throw retryErr;
+        }
       }
     } else {
-      result = await this.inner.doGenerate(options);
+      try {
+        result = await this.inner.doGenerate(options);
+      } catch (err) {
+        logRequestFailed('generate full prompt', err, plan.promptSig);
+        throw err;
+      }
     }
     const id = (result.providerMetadata as Record<string, Record<string, unknown>> | undefined)?.google
       ?.interactionId as string | undefined;
@@ -183,22 +220,38 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
   async doStream(options: LanguageModelV3CallOptions): Promise<LanguageModelV3StreamResult> {
     const plan = await this.plan(options);
     if (plan.kind !== 'hit') {
-      const out = await this.inner.doStream(options);
+      let out: LanguageModelV3StreamResult;
+      try {
+        out = await this.inner.doStream(options);
+      } catch (err) {
+        logRequestFailed('stream full prompt', err, plan.promptSig);
+        throw err;
+      }
       return {
         ...out,
         stream: out.stream.pipeThrough(this.registrationTransform(plan.chainHashAtEnd, options.abortSignal)),
       };
     }
 
-    debug(`stream continuation hit prevId=${idSuffix(plan.previousInteractionId)}`);
+    const contParams = buildContinuationParams(options, plan);
+    debug(
+      `stream continuation hit prevId=${idSuffix(plan.previousInteractionId)} delta=${encodePromptSignature(contParams.prompt as unknown[])}`,
+    );
     let out: LanguageModelV3StreamResult;
     try {
-      out = await this.inner.doStream(buildContinuationParams(options, plan));
+      out = await this.inner.doStream(contParams);
     } catch (err) {
+      logRequestFailed('stream continuation', err, plan.promptSig);
       if (!ChainedInteractionsModel.isStale400(err, options.abortSignal)) throw err;
       debug('stale interaction id at stream bootstrap; invalidating and retrying full prompt');
       await this.store.invalidate(plan.anchorHash);
-      const fallback = await this.inner.doStream(options);
+      let fallback: LanguageModelV3StreamResult;
+      try {
+        fallback = await this.inner.doStream(options);
+      } catch (retryErr) {
+        logRequestFailed('stream full prompt retry', retryErr, plan.promptSig);
+        throw retryErr;
+      }
       return {
         ...fallback,
         stream: fallback.stream.pipeThrough(this.registrationTransform(plan.chainHashAtEnd, options.abortSignal)),
@@ -214,7 +267,7 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
   private createResilientStream(
     source: ReadableStream<LanguageModelV3StreamPart>,
     options: LanguageModelV3CallOptions,
-    plan: ContinuationHit,
+    plan: ContinuationHit & { promptSig: string },
   ): ReadableStream<LanguageModelV3StreamPart> {
     const store = this.store;
     const inner = this.inner;
@@ -244,7 +297,7 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
 
         const switchToFallback = async (reason: string): Promise<boolean> => {
           if (isFallback || hasEmittedContent || signal?.aborted) return false;
-          debug(`continuation stream failed (${reason}); invalidating anchor and retrying full prompt`);
+          debug(`continuation stream failed (${reason}); invalidating anchor and retrying full prompt sig=${plan.promptSig}`);
           try {
             await currentReader.cancel();
           } catch {}
@@ -258,6 +311,7 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
             currentReader = fallbackResult.stream.getReader();
             return true;
           } catch (err) {
+            logRequestFailed('stream fallback bootstrap', err, plan.promptSig);
             controller.error(err);
             return false;
           }

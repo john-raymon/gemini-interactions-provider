@@ -17,9 +17,9 @@ export interface StepViolation {
   description: string;
 }
 
-type Role = 'system' | 'user' | 'assistant' | 'tool' | 'unknown';
+export type Role = 'system' | 'user' | 'assistant' | 'tool' | 'unknown';
 
-interface Msg {
+export interface Msg {
   role: Role;
   parts: unknown[];
   /** True when content was a non-array scalar (legacy string tool result). */
@@ -48,9 +48,21 @@ function toMsg(raw: unknown): Msg {
   };
 }
 
+/** Role of a message in the signature grammar. */
+export function messageRoleOf(raw: unknown): Role {
+  return toMsg(raw).role;
+}
+
+/** Content parts of a message, normalized (string content -> single text part). */
+export function partsOfMessage(raw: unknown): unknown[] {
+  return toMsg(raw).parts;
+}
+
 /** Classify a content part: t=reasoning/thought, m=text, c=tool-call,
  *  r=tool-result, null=skip (step-start), '?'=unknown. */
-function classifyPart(part: unknown): 't' | 'm' | 'c' | 'r' | '?' | null {
+export type PartCode = 't' | 'm' | 'c' | 'r' | '?' | null;
+
+export function partCodeOf(part: unknown): PartCode {
   const type = (part as { type?: unknown } | null)?.type;
   switch (type) {
     case 'step-start':
@@ -73,9 +85,9 @@ function classifyPart(part: unknown): 't' | 'm' | 'c' | 'r' | '?' | null {
 
 /** Count tool results in a tool message. Strictly counts 'r' parts; a non-array
  *  scalar content (legacy string result) counts as exactly one result. */
-function countToolResults(msg: Msg): number {
+export function countToolResults(msg: Msg): number {
   if (msg.scalarContent) return 1;
-  return msg.parts.reduce<number>((n, p) => n + (classifyPart(p) === 'r' ? 1 : 0), 0);
+  return msg.parts.reduce<number>((n, p) => n + (partCodeOf(p) === 'r' ? 1 : 0), 0);
 }
 
 /** Compact per-message signature, e.g. "S U A(t c) R U A(m)" or "S U A(m c) R(2) U". */
@@ -92,7 +104,7 @@ export function encodePromptSignature(messages: unknown[]): string {
         break;
       case 'assistant': {
         const codes = msg.parts
-          .map(classifyPart)
+          .map(partCodeOf)
           .filter((c): c is 't' | 'm' | 'c' | 'r' | '?' => c !== null)
           .join(' ');
         tokens.push(`A(${codes})`);
@@ -127,7 +139,7 @@ export function findStepViolations(messages: unknown[]): StepViolation[] {
     }
     if (msg.role === 'assistant') {
       msg.parts.forEach((part, partIdx) => {
-        const code = classifyPart(part);
+        const code = partCodeOf(part);
         if (code === 'm') {
           textSeen = true;
         } else if (code === 'c') {
@@ -184,4 +196,9 @@ export function formatSignatureDebug(messages: unknown[]): string {
     .map((v) => `${v.kind}@msg${v.messageIndex}${v.partIndex !== undefined ? `.part${v.partIndex}` : ''}`)
     .join(', ');
   return `${sig} | violations: ${list}`;
+}
+
+/** Results count for a raw message shaped like a tool message (scalar content counts as 1). */
+export function countToolResultsInMessage(raw: unknown): number {
+  return countToolResults(toMsg(raw));
 }

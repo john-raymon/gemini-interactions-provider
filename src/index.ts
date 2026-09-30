@@ -45,6 +45,9 @@ export function createGeminiInteractions(options: GeminiInteractionsOptions = {}
     if (resolved === undefined) delete googleOptions.apiKey;
     else googleOptions.apiKey = resolved;
   }
+  if (!googleOptions.baseURL) {
+    googleOptions.baseURL = 'https://generativelanguage.googleapis.com/v1';
+  }
   const inner = createGoogleGenerativeAI(googleOptions);
   const storeOpts: StoreOptions | undefined = cacheDir ? { dir: cacheDir } : undefined;
   const sharedStore = store ?? new InteractionStore(storeOpts);

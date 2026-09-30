@@ -72,7 +72,7 @@ describe('end-to-end via stubbed fetch (real @ai-sdk/google conversion)', () => 
 
     const r1 = await model.doGenerate({ prompt: [sys('rules'), user('question one')] });
     expect(requests).toHaveLength(1);
-    expect(requests[0].url).toContain('/interactions');
+    expect(requests[0].url).toBe('https://generativelanguage.googleapis.com/v1/interactions');
     expect(requests[0].apiKey).toBe('secret-key');
     expect(requests[0].body).not.toContain('previous_interaction_id');
 

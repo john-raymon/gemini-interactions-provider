@@ -32,6 +32,13 @@ describe('opencode loader contract', () => {
   it('exposes defaultDir and store options without leaking internals', () => {
     expect(defaultDir()).toContain('gemini-interactions-provider');
   });
+  it('exports step normalization and signature utilities', () => {
+    expect(typeof mod.normalizeSteps).toBe('function');
+    expect(typeof mod.hasChangesAtOrAfter).toBe('function');
+    expect(typeof mod.findStepViolations).toBe('function');
+    expect(typeof mod.encodePromptSignature).toBe('function');
+  });
+
 });
 
 describe('end-to-end via stubbed fetch (real @ai-sdk/google conversion)', () => {

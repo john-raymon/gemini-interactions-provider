@@ -55,10 +55,19 @@ Eliminate Open Design's Gemini TPM burn (dropping ~70k-token payload averages do
 - [x] 28/28 Open Design daemon tests passing; daemon typecheck and build green.
 - [x] 53/53 wrapper tests passing; complete documentation and E2E runbook.
 
+### Turn-FSM Normalization & Post-Compaction Resilience (6-Chunk Upgrade)
+- [x] **Chunk 1**: `src/step-signature.ts` & `tests/step-signature.test.ts` (pure structural signature encoder `encodePromptSignature`, turn-FSM violation detector `findStepViolations`, 15 tests).
+- [x] **Chunk 2**: Integrated step-signature telemetry into `src/language-model.ts` and `tests/language-model-telemetry.test.ts` (`[plan] ... sig=...`, `[sig-violation] ...`, `request failed (...): ... sig=...`).
+- [x] **Chunk 3**: `src/normalize-steps.ts` & `tests/normalize-steps.test.ts` (pure wire normalizer `normalizeSteps`, `hasChangesAtOrAfter`, demoting pre-call text to reasoning, pruning orphan results, synthesizing error tool results, 14 tests).
+- [x] **Chunk 4**: Integrated normalizer into `ChainedInteractionsModel` in `src/language-model.ts` & `tests/language-model-normalize.test.ts` (wire-only normalization on full/stream dispatches, stale-400 retries, and stream fallback, keeping raw history fingerprints).
+- [x] **Chunk 5**: `tests/compaction-turn-fsm-replay.test.ts` (reconstructed real-world Open Design run `7dc2efc8` post-compaction fixture, built `StrictTurnFsmMockModel`, verified full multi-turn continuation and streaming lifecycles, 5 tests).
+- [x] **Chunk 6**: Public API export wiring in `src/index.ts`, complete test verification (130/130 tests), typechecks, production esbuild bundling (`dist/index.js`), and documentation.
+
 ---
 
 ## Verification Summary
-- **Unit & Integration Tests**: 53 passed in `gemini-interactions-provider`; 28 passed in `@open-design/daemon`.
+- **Unit & Integration Tests**: 130 passed across 12 test files in `gemini-interactions-provider`; 28 passed in `@open-design/daemon`.
+- **Turn-FSM Replay**: Full reproduction and automated resolution of Open Design compaction crash `7dc2efc8-f698-4635-821a-ea309432cc47`.
 - **Typechecks**: Clean across both repositories.
-- **Builds**: Clean across both repositories.
+- **Builds**: Clean across both repositories (`1.2MB` standalone bundled `dist/index.js`).
 - **Security Check**: Verified zero API keys or sensitive conversation text in logs, caches, or committed artifacts.

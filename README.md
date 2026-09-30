@@ -46,3 +46,21 @@ Opencode's generic provider loader imports the `file://` entrypoint, invokes `cr
 - **`src/language-model.ts`**: `ChainedInteractionsModel` implementing `LanguageModelV3`. Handles `doGenerate` and `doStream` with eager stream finish registration and single-turn stale recovery.
 - **`src/matcher.ts`**: Continuation parameter builder that preserves request-scoped system instructions while stripping already-persisted tool schemas.
 - **`src/index.ts`**: Factory entrypoint `createGeminiInteractions`.
+- **`src/step-signature.ts`**: Compact structural turn-FSM signature encoder (`encodePromptSignature`) and violation detector (`findStepViolations`). Detects `text_before_call`, `orphan_call`, and `orphan_result` conditions without allocations on clean paths.
+- **`src/normalize-steps.ts`**: Pure wire-only normalizer (`normalizeSteps`, `hasChangesAtOrAfter`). Demotes conversational text preceding tool calls in consecutive assistant turns to `reasoning` (thought) parts, prunes orphan/excess tool results, and synthesizes balanced error tool responses for dangling tool calls. Idempotent and never mutates caller prompt arrays.
+
+## Turn-FSM Normalization & Compaction Resilience
+
+Google's Gemini Interactions API enforces strict turn-FSM constraints:
+> `"Please ensure that function call turn comes immediately after a user turn or after a function response turn."`
+
+When client applications (such as Open Design) perform aggressive context compaction or inject text summaries as assistant messages directly before a tool call (e.g. `User -> Assistant(text: "## Summary") -> Assistant(thought, call)`), the raw turn sequence violates Google's wire FSM.
+
+`gemini-interactions-provider` solves this transparently without mutating history fingerprints:
+1. **Raw History Fingerprint Isolation**: Fingerprints and store lookups (`plan()`) always operate on raw conversation prompts so client hashes remain stable across turns.
+2. **Wire-Boundary Normalization**: Wire payloads sent to Google are automatically normalized:
+   - Any model `text` parts appearing before the final tool call in a consecutive-assistant region are demoted to `reasoning` (thought) parts, preserving context while satisfying Google's wire schema.
+   - Orphaned tool results (severed by compaction) are pruned from the wire payload.
+   - Dangling tool calls at turn boundaries are synthesized with standard error results (`isError: true`, `[Tool execution aborted or pruned by client]`).
+3. **Continuation Tail Invariance**: Continuation matching (`previousInteractionId`) inspects `hasChangesAtOrAfter(changes, deltaStart)`. If the tail is clean, the continuation delta is dispatched without false pruning. If the tail contains structural alterations, the provider gracefully falls back to sending the full normalized prompt.
+

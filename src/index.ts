@@ -90,3 +90,16 @@ export { normalizeToolArgs } from './tool-alias.js';
 export { ChainedInteractionsModel } from './language-model.js';
 export { buildContinuationParams, deepMerge } from './matcher.js';
 export { debug } from './logger.js';
+export {
+  encodePromptSignature,
+  findStepViolations,
+  type StepViolation,
+  type StepViolationKind,
+} from './step-signature.js';
+export {
+  normalizeSteps,
+  hasChangesAtOrAfter,
+  type NormalizeStepsChanges,
+  type NormalizeStepsResult,
+} from './normalize-steps.js';
+

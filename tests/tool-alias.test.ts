@@ -48,6 +48,21 @@ describe('normalizeToolArgs', () => {
       });
       expect(output).not.toHaveProperty('path');
     });
+    it('normalizes absolute_path and absolutePath to filePath', () => {
+      const input = { absolute_path: '/path/to/file.html', offset: 910, limit: 70 };
+      expect(normalizeToolArgs('read', input)).toEqual({
+        filePath: '/path/to/file.html',
+        offset: 910,
+        limit: 70,
+      });
+
+      const inputCamel = { absolutePath: '/path/to/file.html', offset: 910 };
+      expect(normalizeToolArgs('read', inputCamel)).toEqual({
+        filePath: '/path/to/file.html',
+        offset: 910,
+      });
+    });
+
 
     it('enforces canonical precedence: filePath already present wins', () => {
       const input = { filePath: '/canonical.ts', file_path: '/alias.ts' };

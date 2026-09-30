@@ -21,14 +21,14 @@ export function canonicalizeToolName(name: string): string {
 
 const RAW_TOOL_DEFINITIONS: Record<string, CanonicalGroup[]> = {
   read: [
-    { canonical: 'filePath', aliases: ['file_path', 'path'] },
+    { canonical: 'filePath', aliases: ['file_path', 'path', 'absolute_path', 'absolutePath', 'filepath', 'file', 'filename'] },
   ],
   write: [
-    { canonical: 'filePath', aliases: ['file_path', 'path'] },
+    { canonical: 'filePath', aliases: ['file_path', 'path', 'absolute_path', 'absolutePath', 'filepath', 'file', 'filename'] },
     { canonical: 'content', aliases: ['contents', 'text', 'code'] },
   ],
   edit: [
-    { canonical: 'filePath', aliases: ['file_path', 'path'] },
+    { canonical: 'filePath', aliases: ['file_path', 'path', 'absolute_path', 'absolutePath', 'filepath', 'file', 'filename'] },
     { canonical: 'oldString', aliases: ['old_string', 'oldText', 'old_text', 'oldStr', 'old_str'] },
     { canonical: 'newString', aliases: ['new_string', 'newText', 'new_text', 'newStr', 'new_str'] },
   ],
@@ -143,7 +143,7 @@ export function normalizeToolArgs(toolName: string, args: unknown): unknown {
     // Fast check: do any of the alias keys appear as substrings?
     let mightHaveAlias = false;
     for (const alias of rule.allAliasKeys) {
-      if (args.includes(alias)) {
+      if (args.includes(`"${alias}"`)) {
         mightHaveAlias = true;
         break;
       }

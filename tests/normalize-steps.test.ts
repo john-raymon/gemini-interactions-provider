@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeSteps } from '../src/normalize-steps.js';
+import { hasChangesAtOrAfter, normalizeSteps } from '../src/normalize-steps.js';
 import { findStepViolations } from '../src/step-signature.js';
 
 const text = (t: string) => ({ type: 'text', text: t });
@@ -16,7 +16,13 @@ const A = (...parts: unknown[]) => ({ role: 'assistant', content: parts });
 const T = (...parts: unknown[]) => ({ role: 'tool', content: parts });
 const S = (t: string) => ({ role: 'system', content: t });
 
-const zeroChanges = { demotedTexts: 0, prunedResults: 0, synthesizedResults: 0 };
+const zeroChanges = {
+  demotedTexts: 0,
+  prunedResults: 0,
+  synthesizedResults: 0,
+  changedIndices: [],
+  appendedAtEnd: false,
+};
 
 function expectCleanNormalized(msgs: unknown[]) {
   const res = normalizeSteps(msgs);
@@ -140,4 +146,22 @@ describe('normalizeSteps', () => {
     expect(res.prompt).toBe(msgs);
     expect(res.changes).toEqual(zeroChanges);
   });
+  it('correctly reports hasChangesAtOrAfter', () => {
+    // Dirty prefix at index 1, clean tail at index 3..4
+    const msgs = [U('go'), A(text('summary'), call('c1')), T(result('c1')), U('continue'), A(text('ok'))];
+    const res = normalizeSteps(msgs);
+    expect(res.changes.changedIndices).toEqual([1]);
+    expect(res.changes.appendedAtEnd).toBe(false);
+    expect(hasChangesAtOrAfter(res.changes, 0)).toBe(true);
+    expect(hasChangesAtOrAfter(res.changes, 1)).toBe(true);
+    expect(hasChangesAtOrAfter(res.changes, 2)).toBe(false);
+    expect(hasChangesAtOrAfter(res.changes, 3)).toBe(false);
+
+    // Trailing synthesis
+    const trailingCall = [U('go'), A(call('c1'))];
+    const res2 = normalizeSteps(trailingCall);
+    expect(res2.changes.appendedAtEnd).toBe(true);
+    expect(hasChangesAtOrAfter(res2.changes, 10)).toBe(true);
+  });
+
 });

@@ -16,11 +16,34 @@ import {
   computeResponseContentHash,
   findContinuation,
 } from './fingerprint.js';
-import { debug, hashPrefix, idSuffix } from './logger.js';
+import { debug, hashPrefix, idSuffix, isDebugEnabled } from './logger.js';
 import { normalizeToolArgs } from './tool-alias.js';
 import { encodePromptSignature, findStepViolations } from './step-signature.js';
+import { hasChangesAtOrAfter, normalizeSteps, type NormalizeStepsResult } from './normalize-steps.js';
 
 type PlanResult = ContinuationResult & { promptSig: string };
+
+function toWireOptions(
+  options: LanguageModelV3CallOptions,
+  label: string,
+): { wireOptions: LanguageModelV3CallOptions; norm: NormalizeStepsResult } {
+  const norm = normalizeSteps(options.prompt as unknown[]);
+  const total = norm.changes.demotedTexts + norm.changes.prunedResults + norm.changes.synthesizedResults;
+  if (total === 0) {
+    return { wireOptions: options, norm };
+  }
+  if (isDebugEnabled()) {
+    const beforeSig = encodePromptSignature(options.prompt as unknown[]);
+    const afterSig = encodePromptSignature(norm.prompt);
+    debug(
+      `[wire-normalized] (${label}) demotedTexts=${norm.changes.demotedTexts} prunedResults=${norm.changes.prunedResults} synthesizedResults=${norm.changes.synthesizedResults} sig=${beforeSig} -> ${afterSig}`,
+    );
+  }
+  return {
+    wireOptions: { ...options, prompt: norm.prompt as LanguageModelV3CallOptions['prompt'] },
+    norm,
+  };
+}
 
 function errLabel(err: unknown): string {
   return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
@@ -144,8 +167,10 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
 
   async doGenerate(options: LanguageModelV3CallOptions): Promise<LanguageModelV3GenerateResult> {
     const plan = await this.plan(options);
+    const { wireOptions: fullWireOptions, norm } = toWireOptions(options, 'generate full');
     let result: LanguageModelV3GenerateResult;
-    if (plan.kind === 'hit') {
+    const canContinue = plan.kind === 'hit' && !hasChangesAtOrAfter(norm.changes, plan.deltaStart);
+    if (canContinue) {
       const contParams = buildContinuationParams(options, plan);
       debug(
         `continuation hit prevId=${idSuffix(plan.previousInteractionId)} tail=${options.prompt.length - plan.deltaStart} msg(s) delta=${encodePromptSignature(contParams.prompt as unknown[])}`,
@@ -158,15 +183,20 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
         debug('stale interaction id detected; invalidating and retrying full prompt');
         await this.store.invalidate(plan.anchorHash);
         try {
-          result = await this.inner.doGenerate(options);
+          result = await this.inner.doGenerate(fullWireOptions);
         } catch (retryErr) {
           logRequestFailed('generate full prompt retry', retryErr, plan.promptSig);
           throw retryErr;
         }
       }
     } else {
+      if (plan.kind === 'hit') {
+        debug(
+          `continuation skipped: tail contains step alterations (at/after deltaStart=${plan.deltaStart}); sending normalized full prompt`,
+        );
+      }
       try {
-        result = await this.inner.doGenerate(options);
+        result = await this.inner.doGenerate(fullWireOptions);
       } catch (err) {
         logRequestFailed('generate full prompt', err, plan.promptSig);
         throw err;
@@ -219,10 +249,17 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
 
   async doStream(options: LanguageModelV3CallOptions): Promise<LanguageModelV3StreamResult> {
     const plan = await this.plan(options);
-    if (plan.kind !== 'hit') {
+    const { wireOptions: fullWireOptions, norm } = toWireOptions(options, 'stream full');
+    const canContinue = plan.kind === 'hit' && !hasChangesAtOrAfter(norm.changes, plan.deltaStart);
+    if (!canContinue) {
+      if (plan.kind === 'hit') {
+        debug(
+          `stream continuation skipped: tail contains step alterations (at/after deltaStart=${plan.deltaStart}); sending normalized full prompt`,
+        );
+      }
       let out: LanguageModelV3StreamResult;
       try {
-        out = await this.inner.doStream(options);
+        out = await this.inner.doStream(fullWireOptions);
       } catch (err) {
         logRequestFailed('stream full prompt', err, plan.promptSig);
         throw err;
@@ -247,7 +284,7 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
       await this.store.invalidate(plan.anchorHash);
       let fallback: LanguageModelV3StreamResult;
       try {
-        fallback = await this.inner.doStream(options);
+        fallback = await this.inner.doStream(fullWireOptions);
       } catch (retryErr) {
         logRequestFailed('stream full prompt retry', retryErr, plan.promptSig);
         throw retryErr;
@@ -258,7 +295,7 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
       };
     }
 
-    const stream = this.createResilientStream(out.stream, options, plan);
+    const stream = this.createResilientStream(out.stream, options, plan, fullWireOptions);
     return {
       ...out,
       stream,
@@ -268,6 +305,7 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
     source: ReadableStream<LanguageModelV3StreamPart>,
     options: LanguageModelV3CallOptions,
     plan: ContinuationHit & { promptSig: string },
+    fallbackWireOptions: LanguageModelV3CallOptions,
   ): ReadableStream<LanguageModelV3StreamPart> {
     const store = this.store;
     const inner = this.inner;
@@ -307,7 +345,7 @@ export class ChainedInteractionsModel implements LanguageModelV3 {
           slotIndexById.clear();
           chainHashAtEnd = plan.chainHashAtEnd;
           try {
-            const fallbackResult = await inner.doStream(options);
+            const fallbackResult = await inner.doStream(fallbackWireOptions);
             currentReader = fallbackResult.stream.getReader();
             return true;
           } catch (err) {

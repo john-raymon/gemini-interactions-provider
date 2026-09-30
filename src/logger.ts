@@ -7,7 +7,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 
-function isEnabled(): boolean {
+export function isDebugEnabled(): boolean {
   const val = process.env.OD_INTERACTIONS_DEBUG?.trim().toLowerCase();
   if (val === '0' || val === 'false' || val === 'no' || val === 'off') return false;
   return true;
@@ -35,7 +35,7 @@ function resolveLogFile(): string | null {
 }
 
 export function debug(...args: unknown[]): void {
-  if (!isEnabled()) return;
+  if (!isDebugEnabled()) return;
   const line = sanitize(
     `[gemini-interactions] ${args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`,
   );

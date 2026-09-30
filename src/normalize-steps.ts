@@ -21,6 +21,15 @@ export interface NormalizeStepsChanges {
   prunedResults: number;
   /** synthesized error tool-results added (orphan_call class). */
   synthesizedResults: number;
+  /** Raw input message indices where changes occurred (modified, pruned, or insertion before). */
+  changedIndices: number[];
+  /** Whether synthetic tool results were appended at the end of messages. */
+  appendedAtEnd: boolean;
+}
+
+export function hasChangesAtOrAfter(changes: NormalizeStepsChanges, startIndex: number): boolean {
+  if (changes.appendedAtEnd) return true;
+  return changes.changedIndices.some((idx) => idx >= startIndex);
 }
 
 export interface NormalizeStepsResult {
@@ -58,7 +67,13 @@ function synthToolMessage(calls: CallInfo[]): unknown {
 }
 
 export function normalizeSteps(messages: unknown[]): NormalizeStepsResult {
-  const changes: NormalizeStepsChanges = { demotedTexts: 0, prunedResults: 0, synthesizedResults: 0 };
+  const changes: NormalizeStepsChanges = {
+    demotedTexts: 0,
+    prunedResults: 0,
+    synthesizedResults: 0,
+    changedIndices: [],
+    appendedAtEnd: false,
+  };
   const demote = new Map<number, Set<number>>();
   const dropMessage = new Set<number>();
   const pruneParts = new Map<number, Set<number>>();
@@ -159,6 +174,16 @@ export function normalizeSteps(messages: unknown[]): NormalizeStepsResult {
     changes.synthesizedResults += pending.length;
     pending.length = 0;
   }
+
+  changes.changedIndices = Array.from(
+    new Set([
+      ...demote.keys(),
+      ...dropMessage.values(),
+      ...pruneParts.keys(),
+      ...insertBefore.keys(),
+    ]),
+  ).sort((a, b) => a - b);
+  changes.appendedAtEnd = appendEnd.length > 0;
 
   if (changes.demotedTexts + changes.prunedResults + changes.synthesizedResults === 0) {
     return { prompt: messages, changes };
